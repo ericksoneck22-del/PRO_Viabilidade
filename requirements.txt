@@ -1,0 +1,112 @@
+import os
+from typing import List, Optional
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from motor.motor_asyncio import AsyncIOMotorClient
+import google.generativeai as genai
+
+# --- CONFIGURAÇÕES ---
+# O Render injeta as variáveis de ambiente aqui automaticamente
+MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
+DB_NAME = "ora_viva_db"
+API_KEY = os.getenv("GOOGLE_API_KEY", "") 
+
+# Configura o Gemini apenas se a chave existir
+if API_KEY:
+    genai.configure(api_key=API_KEY)
+
+app = FastAPI(title="Ora Viva Business Engine")
+
+# CORS configurado para permitir conexões do seu frontend na Vercel
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], # Em produção, substitua pelo domínio da sua Vercel
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# --- MODELOS DE DADOS ---
+class Expense(BaseModel):
+    label: str
+    value: float
+    category: str
+    isMvp: bool
+
+class BusinessPlanRequest(BaseModel):
+    title: str
+    language: str = "pt"
+    initial_investment: float
+    revenue: float
+    expenses: List[Expense]
+    canvas_context: Optional[str] = ""
+
+# --- BANCO DE DADOS ---
+client = AsyncIOMotorClient(MONGO_URI)
+db = client[DB_NAME]
+
+# --- LÓGICA DO GEMINI ---
+async def generate_gemini_analysis(data: BusinessPlanRequest):
+    if not API_KEY:
+        return "Erro: Chave de API não configurada no servidor."
+        
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    
+    prompt = f"""
+    Como consultor sénior de negócios especializado em Metodologia Canvas e normas SEBRAE, analise: {data.title}.
+    Idioma: {data.language}
+    
+    DADOS FINANCEIROS:
+    - Investimento Inicial: ${data.initial_investment}
+    - Faturamento Mensal: ${data.revenue}
+    - Despesas: {[{'item': e.label, 'valor': e.value} for e in data.expenses]}
+    
+    CONTEXTO DO CANVAS:
+    {data.canvas_context}
+    
+    TAREFA:
+    1. Calcule o Ponto de Equilíbrio.
+    2. Critique a Margem de Lucro (seja conservador e realista).
+    3. Dê 3 conselhos práticos específicos para este MVP (foco em Cabo Verde/Sal se aplicável).
+    Responda em Markdown executivo.
+    """
+    
+    try:
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        return f"Erro na análise: {str(e)}"
+
+# --- ENDPOINTS ---
+
+@app.post("/api/generate-analysis")
+async def create_plan(request: BusinessPlanRequest):
+    analysis = await generate_gemini_analysis(request)
+    
+    plan_doc = {
+        "title": request.title,
+        "financials": request.dict(),
+        "analysis": analysis,
+        "created_at": "2026-02-01" 
+    }
+    
+    result = await db.plans.insert_one(plan_doc)
+    
+    return {
+        "id": str(result.inserted_id),
+        "analysis": analysis
+    }
+
+@app.get("/api/history")
+async def get_history():
+    cursor = db.plans.find().sort("_id", -1)
+    history = await cursor.to_list(length=10)
+    for doc in history:
+        doc["_id"] = str(doc["_id"])
+    return history
+
+if __name__ == "__main__":
+    import uvicorn
+    # Usa a porta definida pelo Render ou 8000 localmente
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)

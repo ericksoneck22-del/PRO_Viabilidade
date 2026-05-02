@@ -1,0 +1,3 @@
+meu-projeto-ora-viva/
+├── main.py            <-- O código que está aqui à direita
+└── requirements.txt   <-- O ficheiro com as bibliotecas (fastapi, etc.)
